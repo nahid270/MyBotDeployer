@@ -4,65 +4,86 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Smart Bot Manager</title>
-    <!-- Bootstrap CSS for styling -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
 </head>
 <body class="bg-dark text-white">
 
 <div class="container mt-5">
     <h1 class="text-center mb-4">🤖 Smart Multi-Bot Manager</h1>
 
-    <!-- নতুন বট অ্যাড করার ফর্ম -->
+    <!-- Deploy Form -->
     <div class="card bg-secondary text-white mb-5">
         <div class="card-header">Deploy New Bot</div>
         <div class="card-body">
             <form action="/deploy" method="POST">
                 <div class="mb-3">
-                    <label class="form-label">GitHub Repo Link</label>
-                    <input type="text" name="repo_link" class="form-control" placeholder="https://github.com/user/repo" required>
+                    <input type="text" name="repo_link" class="form-control" placeholder="GitHub Repo Link" required>
                 </div>
                 <div class="mb-3">
-                    <label class="form-label">Start File Name</label>
-                    <input type="text" name="start_file" class="form-control" value="main.py" required>
+                    <input type="text" name="start_file" class="form-control" placeholder="Start File (e.g. main.py) - Optional">
                 </div>
-                <button type="submit" class="btn btn-success w-100">🚀 Deploy & Start</button>
+                <button type="submit" class="btn btn-success w-100">🚀 Deploy & Auto-Install</button>
             </form>
         </div>
     </div>
 
-    <!-- রানিং বটের লিস্ট -->
-    <h3 class="mb-3">Manage Bots</h3>
+    <!-- Live Status Table -->
+    <h3 class="mb-3">Live Bot Status <span id="loading" style="font-size: 0.6em; color: yellow;">(Auto-updating...)</span></h3>
     <table class="table table-dark table-hover">
         <thead>
             <tr>
                 <th>Bot Name</th>
-                <th>Status</th>
+                <th>Status</th> <!-- এখন এখানে লাইভ আপডেট দেখাবে -->
                 <th>Actions</th>
             </tr>
         </thead>
-        <tbody>
-            {% for bot in bots %}
-            <tr>
-                <td>{{ bot.name }}</td>
-                <td>{{ bot.status }}</td>
-                <td>
-                    {% if bot.running %}
-                        <a href="/stop/{{ bot.name }}" class="btn btn-warning btn-sm">🛑 Stop</a>
-                    {% else %}
-                        <!-- স্টার্ট করার জন্য আবার ডিপ্লয় করতে হবে (Simplified Logic) -->
-                        <form action="/deploy" method="POST" style="display:inline;">
-                            <input type="hidden" name="repo_link" value="https://github.com/placeholder/{{ bot.name }}">
-                            <input type="hidden" name="start_file" value="main.py"> 
-                            <button class="btn btn-secondary btn-sm" disabled>Stopped</button>
-                        </form>
-                    {% endif %}
-                    <a href="/delete/{{ bot.name }}" class="btn btn-danger btn-sm">🗑️ Delete</a>
-                </td>
-            </tr>
-            {% endfor %}
+        <tbody id="bot-table-body">
+            <!-- JavaScript data will load here -->
         </tbody>
     </table>
 </div>
+
+<script>
+    function updateStatus() {
+        $.getJSON('/status', function(data) {
+            let rows = '';
+            if(data.length === 0) {
+                rows = '<tr><td colspan="3" class="text-center">No bots deployed yet.</td></tr>';
+            } else {
+                $.each(data, function(key, bot) {
+                    // Status Color Code
+                    let statusColor = bot.status.includes("Running") ? "text-success" : 
+                                      bot.status.includes("Installing") ? "text-warning" : 
+                                      bot.status.includes("Cloning") ? "text-info" : "text-danger";
+
+                    // Action Buttons Logic
+                    let actionBtn = '';
+                    if (bot.status.includes("Running")) {
+                        actionBtn = `<a href="/stop/${bot.name}" class="btn btn-warning btn-sm">🛑 Stop</a>`;
+                    } else {
+                        actionBtn = `<button class="btn btn-secondary btn-sm" disabled>Stopped</button>`;
+                    }
+                    
+                    rows += `
+                    <tr>
+                        <td class="fw-bold">${bot.name}</td>
+                        <td class="${statusColor} fw-bold">${bot.status}</td>
+                        <td>
+                            ${actionBtn}
+                            <a href="/delete/${bot.name}" class="btn btn-danger btn-sm ms-1">🗑️ Delete</a>
+                        </td>
+                    </tr>`;
+                });
+            }
+            $('#bot-table-body').html(rows);
+        });
+    }
+
+    // প্রতি ২ সেকেন্ড পর পর আপডেট করবে
+    setInterval(updateStatus, 2000);
+    updateStatus(); // প্রথমবার লোড
+</script>
 
 </body>
 </html>
