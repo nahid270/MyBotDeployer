@@ -6,7 +6,8 @@ import threading
 import ast
 import time
 import random
-from flask import Flask, render_template, request, redirect, url_for, jsonify
+import requests  # নতুন লাইব্রেরি (টানেল তৈরির জন্য)
+from flask import Flask, render_template, request, redirect, url_for, jsonify, Response
 
 app = Flask(__name__)
 
@@ -17,7 +18,7 @@ if not os.path.exists(CLONE_DIR):
 
 running_processes = {}
 deployment_status = {}
-bot_configs = {}  # বটের কনফিগারেশন মনে রাখার জন্য (Link, Port, File)
+bot_configs = {}  # কনফিগারেশন সেভ রাখার মেমোরি
 
 STANDARD_LIBS = {
     "os", "sys", "time", "json", "math", "random", "datetime", "subprocess", "threading",
@@ -62,7 +63,7 @@ def get_imports_from_folder(folder_path):
     return imports
 
 def run_bot_process(folder_name):
-    """শুধুমাত্র বট রান করার ফাংশন (Start Button এর জন্য)"""
+    """বট স্টার্ট করার ফাংশন"""
     repo_path = os.path.join(CLONE_DIR, folder_name)
     config = bot_configs.get(folder_name, {})
     
@@ -75,12 +76,13 @@ def run_bot_process(folder_name):
         deployment_status[folder_name] = "⚠️ File Missing"
         return
 
-    # Process Start
     deployment_status[folder_name] = f"🚀 Starting on Port {assigned_port}..."
     
+    # এনভায়রনমেন্ট সেট করা
     bot_env = os.environ.copy()
     bot_env["PORT"] = str(assigned_port)
     
+    # প্রসেস রান করা
     proc = subprocess.Popen(["python", start_file], cwd=repo_path, env=bot_env)
     running_processes[folder_name] = proc
     
@@ -91,16 +93,13 @@ def run_bot_process(folder_name):
         deployment_status[folder_name] = "❌ Crashed (Check Logs)"
 
 def install_and_run(repo_link, start_file, folder_name, custom_port):
-    """ইন্সটল এবং প্রথমবার রান করার ফাংশন"""
+    """ইন্সটল এবং সেটআপ"""
     repo_path = os.path.join(CLONE_DIR, folder_name)
     
-    # পোর্ট সেটআপ (যদি ইউজার দেয় তো ভালো, না দিলে র‍্যান্ডম)
-    if custom_port:
-        port_to_use = custom_port
-    else:
-        port_to_use = str(random.randint(5001, 9999))
+    # পোর্ট লজিক
+    port_to_use = custom_port if custom_port else str(random.randint(5001, 9999))
 
-    # কনফিগারেশন সেভ করা
+    # কনফিগ সেভ
     bot_configs[folder_name] = {
         "link": repo_link,
         "start_file": start_file,
@@ -112,7 +111,7 @@ def install_and_run(repo_link, start_file, folder_name, custom_port):
             deployment_status[folder_name] = "⬇️ Cloning Repo..."
             subprocess.run(["git", "clone", repo_link, repo_path], check=True)
         
-        # Requirements Check & Install
+        # Requirements
         req_file = os.path.join(repo_path, "requirements.txt")
         if os.path.exists(req_file):
             deployment_status[folder_name] = "📦 Installing Requirements..."
@@ -126,29 +125,66 @@ def install_and_run(repo_link, start_file, folder_name, custom_port):
                     packages_to_install.append(PIP_MAPPING.get(lib, lib))
             
             if packages_to_install:
-                deployment_status[folder_name] = f"📦 Auto-Installing {len(packages_to_install)} Libs..."
+                deployment_status[folder_name] = f"📦 Auto-Installing Libs..."
                 subprocess.run(["pip", "install"] + packages_to_install, cwd=repo_path, stdout=subprocess.DEVNULL)
 
-        # Smart File Finder (যদি ইউজার ভুল নাম দেয়)
+        # File Check
         run_path = os.path.join(repo_path, start_file)
         if not os.path.exists(run_path):
-            possible_files = ["app.py", "main.py", "bot.py", "start.py", "run.py"]
+            possible_files = ["app.py", "main.py", "bot.py", "start.py"]
             for f in possible_files:
                 if os.path.exists(os.path.join(repo_path, f)):
                     start_file = f
-                    bot_configs[folder_name]["start_file"] = f # আপডেট কনফিগ
+                    bot_configs[folder_name]["start_file"] = f
                     break
         
-        # সব শেষে রান করা
         run_bot_process(folder_name)
 
     except Exception as e:
         print(f"Error: {e}")
         deployment_status[folder_name] = "❌ Error Occurred"
 
+# ================= ROUTES =================
+
 @app.route('/')
 def home():
     return render_template('index.html')
+
+# --- নতুন ফিচার: প্রক্সি ভিউয়ার (ওয়েবসাইট দেখার জন্য) ---
+@app.route('/view/<folder_name>/', defaults={'path': ''})
+@app.route('/view/<folder_name>/<path:path>')
+def proxy_view(folder_name, path):
+    """ভেতরের ওয়েবসাইট বাইরে দেখানোর জাদুর টানেল"""
+    config = bot_configs.get(folder_name)
+    
+    if not config or folder_name not in running_processes:
+        return "Bot is not running or not found!", 404
+
+    port = config.get("port")
+    
+    # ভেতরের ইউআরএল তৈরি (Internal URL)
+    base_url = f"http://127.0.0.1:{port}"
+    target_url = f"{base_url}/{path}"
+
+    try:
+        # ভেতরের সাইট থেকে ডেটা আনা
+        resp = requests.request(
+            method=request.method,
+            url=target_url,
+            headers={key: value for (key, value) in request.headers if key != 'Host'},
+            data=request.get_data(),
+            cookies=request.cookies,
+            allow_redirects=False
+        )
+        
+        # বাইরের মানুষকে ডেটা দেখানো
+        excluded_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
+        headers = [(name, value) for (name, value) in resp.headers.items()
+                   if name.lower() not in excluded_headers]
+
+        return Response(resp.content, resp.status_code, headers)
+    except Exception as e:
+        return f"Error connecting to internal bot: {e}", 502
 
 @app.route('/status')
 def status_api():
@@ -168,14 +204,11 @@ def status_api():
             else:
                 current_status = "Stopped 🔴"
 
-            # কনফিগ থেকে পোর্ট বের করা (যদি থাকে)
-            port_info = bot_configs.get(folder, {}).get("port", "N/A")
-
             bots_data.append({
                 "name": folder,
                 "status": current_status,
                 "running": is_running,
-                "port": port_info
+                "port": bot_configs.get(folder, {}).get("port", "N/A")
             })
     return jsonify(bots_data)
 
@@ -183,7 +216,7 @@ def status_api():
 def deploy():
     repo_link = request.form.get('repo_link')
     start_file = request.form.get('start_file') or "main.py"
-    custom_port = request.form.get('custom_port') # নতুন ইনপুট
+    custom_port = request.form.get('custom_port')
     
     if not repo_link: return "Link Required", 400
     
@@ -201,7 +234,6 @@ def deploy():
 
 @app.route('/start/<folder_name>')
 def start_bot(folder_name):
-    # শুধু রান করবে, ইন্সটল করার দরকার নেই
     if folder_name not in running_processes or running_processes[folder_name].poll() is not None:
         deployment_status[folder_name] = "⏳ Starting..."
         thread = threading.Thread(target=run_bot_process, args=(folder_name,))
@@ -223,10 +255,8 @@ def delete_bot(folder_name):
     repo_path = os.path.join(CLONE_DIR, folder_name)
     if os.path.exists(repo_path):
         shutil.rmtree(repo_path)
-    if folder_name in deployment_status:
-        del deployment_status[folder_name]
-    if folder_name in bot_configs:
-        del bot_configs[folder_name]
+    if folder_name in deployment_status: del deployment_status[folder_name]
+    if folder_name in bot_configs: del bot_configs[folder_name]
     return redirect(url_for('home'))
 
 if __name__ == "__main__":
