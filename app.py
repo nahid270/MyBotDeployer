@@ -6,26 +6,29 @@ import threading
 import ast
 import time
 import random
-import requests  # নতুন লাইব্রেরি (টানেল তৈরির জন্য)
+import requests
 from flask import Flask, render_template, request, redirect, url_for, jsonify, Response
 
 app = Flask(__name__)
 
-# কনফিগারেশন
+# --- কনফিগারেশন ---
 CLONE_DIR = "cloned_repos"
 if not os.path.exists(CLONE_DIR):
     os.makedirs(CLONE_DIR)
 
-running_processes = {}
-deployment_status = {}
-bot_configs = {}  # কনফিগারেশন সেভ রাখার মেমোরি
+# মেমোরি স্টোরেজ
+running_processes = {}   # প্রসেস অবজেক্ট
+deployment_status = {}   # স্ট্যাটাস মেসেজ
+bot_configs = {}         # পোর্ট এবং ফাইল ইনফো
 
+# স্ট্যান্ডার্ড লাইব্রেরি (যা ইনস্টল হবে না)
 STANDARD_LIBS = {
     "os", "sys", "time", "json", "math", "random", "datetime", "subprocess", "threading",
     "collections", "re", "ftplib", "http", "urllib", "email", "shutil", "logging", "typing",
     "traceback", "asyncio", "html", "socket", "base64", "io", "platform", "signal", "flask"
 }
 
+# লাইব্রেরি নাম ম্যাপিং
 PIP_MAPPING = {
     "telebot": "pyTelegramBotAPI",
     "telegram": "python-telegram-bot",
@@ -40,10 +43,13 @@ PIP_MAPPING = {
     "yt_dlp": "yt_dlp"
 }
 
+# --- হেল্পার ফাংশন ---
+
 def clean_url(url):
     return url.strip().rstrip("/")
 
 def get_imports_from_folder(folder_path):
+    """কোড স্ক্যান করে লাইব্রেরি ডিটেক্ট করা"""
     imports = set()
     for root, dirs, files in os.walk(folder_path):
         for file in files:
@@ -70,23 +76,23 @@ def run_bot_process(folder_name):
     start_file = config.get("start_file", "main.py")
     assigned_port = config.get("port", str(random.randint(5001, 9999)))
 
-    # Start File Check
+    # ফাইল চেক
     run_path = os.path.join(repo_path, start_file)
     if not os.path.exists(run_path):
-        deployment_status[folder_name] = "⚠️ File Missing"
+        deployment_status[folder_name] = "⚠️ Start File Missing"
         return
 
     deployment_status[folder_name] = f"🚀 Starting on Port {assigned_port}..."
     
-    # এনভায়রনমেন্ট সেট করা
+    # এনভায়রনমেন্ট সেট করা (PORT)
     bot_env = os.environ.copy()
     bot_env["PORT"] = str(assigned_port)
     
-    # প্রসেস রান করা
+    # প্রসেস রান
     proc = subprocess.Popen(["python", start_file], cwd=repo_path, env=bot_env)
     running_processes[folder_name] = proc
     
-    time.sleep(4)
+    time.sleep(5)
     if proc.poll() is None:
         deployment_status[folder_name] = f"Running 🟢 (Port: {assigned_port})"
     else:
@@ -95,8 +101,6 @@ def run_bot_process(folder_name):
 def install_and_run(repo_link, start_file, folder_name, custom_port):
     """ইন্সটল এবং সেটআপ"""
     repo_path = os.path.join(CLONE_DIR, folder_name)
-    
-    # পোর্ট লজিক
     port_to_use = custom_port if custom_port else str(random.randint(5001, 9999))
 
     # কনফিগ সেভ
@@ -111,7 +115,7 @@ def install_and_run(repo_link, start_file, folder_name, custom_port):
             deployment_status[folder_name] = "⬇️ Cloning Repo..."
             subprocess.run(["git", "clone", repo_link, repo_path], check=True)
         
-        # Requirements
+        # Requirements Install
         req_file = os.path.join(repo_path, "requirements.txt")
         if os.path.exists(req_file):
             deployment_status[folder_name] = "📦 Installing Requirements..."
@@ -128,10 +132,10 @@ def install_and_run(repo_link, start_file, folder_name, custom_port):
                 deployment_status[folder_name] = f"📦 Auto-Installing Libs..."
                 subprocess.run(["pip", "install"] + packages_to_install, cwd=repo_path, stdout=subprocess.DEVNULL)
 
-        # File Check
+        # Start File Auto-Correction
         run_path = os.path.join(repo_path, start_file)
         if not os.path.exists(run_path):
-            possible_files = ["app.py", "main.py", "bot.py", "start.py"]
+            possible_files = ["app.py", "main.py", "bot.py", "start.py", "run.py"]
             for f in possible_files:
                 if os.path.exists(os.path.join(repo_path, f)):
                     start_file = f
@@ -144,47 +148,73 @@ def install_and_run(repo_link, start_file, folder_name, custom_port):
         print(f"Error: {e}")
         deployment_status[folder_name] = "❌ Error Occurred"
 
-# ================= ROUTES =================
+# --- ROUTES ---
 
 @app.route('/')
 def home():
     return render_template('index.html')
 
-# --- নতুন ফিচার: প্রক্সি ভিউয়ার (ওয়েবসাইট দেখার জন্য) ---
-@app.route('/view/<folder_name>/', defaults={'path': ''})
-@app.route('/view/<folder_name>/<path:path>')
+# --- 🚀 সুপার প্রক্সি ভিউয়ার (অ্যাডমিন প্যানেল ফিক্স সহ) ---
+@app.route('/view/<folder_name>/', defaults={'path': ''}, methods=['GET', 'POST', 'PUT', 'DELETE'])
+@app.route('/view/<folder_name>/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE'])
 def proxy_view(folder_name, path):
-    """ভেতরের ওয়েবসাইট বাইরে দেখানোর জাদুর টানেল"""
     config = bot_configs.get(folder_name)
     
     if not config or folder_name not in running_processes:
-        return "Bot is not running or not found!", 404
+        return "Bot is not running!", 404
 
     port = config.get("port")
-    
-    # ভেতরের ইউআরএল তৈরি (Internal URL)
     base_url = f"http://127.0.0.1:{port}"
     target_url = f"{base_url}/{path}"
 
+    if request.query_string:
+        target_url += f"?{request.query_string.decode('utf-8')}"
+
     try:
-        # ভেতরের সাইট থেকে ডেটা আনা
+        # ১. রিকোয়েস্ট ফরোয়ার্ড করা
         resp = requests.request(
             method=request.method,
             url=target_url,
-            headers={key: value for (key, value) in request.headers if key != 'Host'},
+            headers={key: value for (key, value) in request.headers if key.lower() != 'host'},
             data=request.get_data(),
             cookies=request.cookies,
-            allow_redirects=False
+            allow_redirects=False # অটো রিডাইরেক্ট বন্ধ
         )
-        
-        # বাইরের মানুষকে ডেটা দেখানো
-        excluded_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
-        headers = [(name, value) for (name, value) in resp.headers.items()
-                   if name.lower() not in excluded_headers]
 
-        return Response(resp.content, resp.status_code, headers)
+        # ২. রিডাইরেক্ট ফিক্স (Location Header Rewrite)
+        if resp.status_code in [301, 302, 303, 307, 308]:
+            location = resp.headers.get('Location')
+            if location:
+                if base_url in location:
+                    location = location.replace(base_url, "")
+                if location.startswith("/"):
+                    new_location = f"/view/{folder_name}{location}"
+                else:
+                    new_location = f"/view/{folder_name}/{location}"
+                return redirect(new_location, code=resp.status_code)
+
+        # ৩. হেডার ফিল্টার করা
+        excluded_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection', 'location']
+        headers = [(name, value) for (name, value) in resp.headers.items() if name.lower() not in excluded_headers]
+
+        # ৪. HTML কন্টেন্ট রিরাইট (CSS/JS/Form Action ফিক্স)
+        content = resp.content
+        if 'text/html' in resp.headers.get('Content-Type', ''):
+            decoded_content = content.decode('utf-8', errors='ignore')
+            
+            # HTML এর ভেতরের রুট লিংকগুলো পরিবর্তন করে প্রক্সি লিংক বানানো
+            decoded_content = decoded_content.replace('href="/', f'href="/view/{folder_name}/')
+            decoded_content = decoded_content.replace('src="/', f'src="/view/{folder_name}/')
+            decoded_content = decoded_content.replace('action="/', f'action="/view/{folder_name}/')
+            # ফর্ম মেথড ফিক্স (যদি দরকার হয়)
+            decoded_content = decoded_content.replace("action='/", f"action='/view/{folder_name}/")
+            
+            content = decoded_content.encode('utf-8')
+
+        return Response(content, resp.status_code, headers)
+
     except Exception as e:
-        return f"Error connecting to internal bot: {e}", 502
+        return f"Proxy Error: {e}", 502
 
 @app.route('/status')
 def status_api():
