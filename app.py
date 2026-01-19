@@ -5,6 +5,7 @@ import shutil
 import threading
 import ast
 import time
+import random
 from flask import Flask, render_template, request, redirect, url_for, jsonify
 
 app = Flask(__name__)
@@ -15,13 +16,13 @@ if not os.path.exists(CLONE_DIR):
     os.makedirs(CLONE_DIR)
 
 running_processes = {}
-# রিয়েল-টাইম স্ট্যাটাস রাখার ডিকশনারি
-deployment_status = {} 
+deployment_status = {}
+bot_configs = {}  # বটের কনফিগারেশন মনে রাখার জন্য (Link, Port, File)
 
 STANDARD_LIBS = {
     "os", "sys", "time", "json", "math", "random", "datetime", "subprocess", "threading",
     "collections", "re", "ftplib", "http", "urllib", "email", "shutil", "logging", "typing",
-    "traceback", "asyncio", "html", "socket", "base64", "io", "platform", "signal"
+    "traceback", "asyncio", "html", "socket", "base64", "io", "platform", "signal", "flask"
 }
 
 PIP_MAPPING = {
@@ -32,7 +33,10 @@ PIP_MAPPING = {
     "PIL": "Pillow",
     "dotenv": "python-dotenv",
     "discord": "discord.py",
-    "aiogram": "aiogram"
+    "aiogram": "aiogram",
+    "googleapiclient": "google-api-python-client",
+    "youtube_dl": "youtube_dl",
+    "yt_dlp": "yt_dlp"
 }
 
 def clean_url(url):
@@ -57,25 +61,64 @@ def get_imports_from_folder(folder_path):
                     pass
     return imports
 
-def install_and_run(repo_link, start_file, folder_name):
-    """স্ট্যাটাস আপডেট সহ স্মার্ট ইনস্টলার"""
-    global deployment_status
+def run_bot_process(folder_name):
+    """শুধুমাত্র বট রান করার ফাংশন (Start Button এর জন্য)"""
     repo_path = os.path.join(CLONE_DIR, folder_name)
+    config = bot_configs.get(folder_name, {})
+    
+    start_file = config.get("start_file", "main.py")
+    assigned_port = config.get("port", str(random.randint(5001, 9999)))
+
+    # Start File Check
+    run_path = os.path.join(repo_path, start_file)
+    if not os.path.exists(run_path):
+        deployment_status[folder_name] = "⚠️ File Missing"
+        return
+
+    # Process Start
+    deployment_status[folder_name] = f"🚀 Starting on Port {assigned_port}..."
+    
+    bot_env = os.environ.copy()
+    bot_env["PORT"] = str(assigned_port)
+    
+    proc = subprocess.Popen(["python", start_file], cwd=repo_path, env=bot_env)
+    running_processes[folder_name] = proc
+    
+    time.sleep(4)
+    if proc.poll() is None:
+        deployment_status[folder_name] = f"Running 🟢 (Port: {assigned_port})"
+    else:
+        deployment_status[folder_name] = "❌ Crashed (Check Logs)"
+
+def install_and_run(repo_link, start_file, folder_name, custom_port):
+    """ইন্সটল এবং প্রথমবার রান করার ফাংশন"""
+    repo_path = os.path.join(CLONE_DIR, folder_name)
+    
+    # পোর্ট সেটআপ (যদি ইউজার দেয় তো ভালো, না দিলে র‍্যান্ডম)
+    if custom_port:
+        port_to_use = custom_port
+    else:
+        port_to_use = str(random.randint(5001, 9999))
+
+    # কনফিগারেশন সেভ করা
+    bot_configs[folder_name] = {
+        "link": repo_link,
+        "start_file": start_file,
+        "port": port_to_use
+    }
 
     try:
-        # ১. ক্লোন করা
         if not os.path.exists(repo_path):
             deployment_status[folder_name] = "⬇️ Cloning Repo..."
             subprocess.run(["git", "clone", repo_link, repo_path], check=True)
         
-        # ২. লাইব্রেরি ইনস্টল
+        # Requirements Check & Install
         req_file = os.path.join(repo_path, "requirements.txt")
-        
         if os.path.exists(req_file):
             deployment_status[folder_name] = "📦 Installing Requirements..."
             subprocess.run(["pip", "install", "-r", "requirements.txt"], cwd=repo_path, stdout=subprocess.DEVNULL)
         else:
-            deployment_status[folder_name] = "🔍 Scanning & Installing..."
+            deployment_status[folder_name] = "🔍 Smart Scanning..."
             detected_imports = get_imports_from_folder(repo_path)
             packages_to_install = []
             for lib in detected_imports:
@@ -83,38 +126,25 @@ def install_and_run(repo_link, start_file, folder_name):
                     packages_to_install.append(PIP_MAPPING.get(lib, lib))
             
             if packages_to_install:
-                deployment_status[folder_name] = f"📦 Installing {len(packages_to_install)} Libs..."
+                deployment_status[folder_name] = f"📦 Auto-Installing {len(packages_to_install)} Libs..."
                 subprocess.run(["pip", "install"] + packages_to_install, cwd=repo_path, stdout=subprocess.DEVNULL)
 
-        # ৩. মেইন ফাইল চেক
+        # Smart File Finder (যদি ইউজার ভুল নাম দেয়)
         run_path = os.path.join(repo_path, start_file)
         if not os.path.exists(run_path):
-            deployment_status[folder_name] = "⚠️ Finding Main File..."
-            possible_files = ["app.py", "main.py", "bot.py", "start.py"]
+            possible_files = ["app.py", "main.py", "bot.py", "start.py", "run.py"]
             for f in possible_files:
                 if os.path.exists(os.path.join(repo_path, f)):
                     start_file = f
-                    run_path = os.path.join(repo_path, start_file)
+                    bot_configs[folder_name]["start_file"] = f # আপডেট কনফিগ
                     break
-
-        # ৪. রান করা
-        if os.path.exists(run_path):
-            deployment_status[folder_name] = "🚀 Starting..."
-            proc = subprocess.Popen(["python", start_file], cwd=repo_path)
-            running_processes[folder_name] = proc
-            
-            # একটু অপেক্ষা করে চেক করা প্রসেস ক্র্যাশ করল কিনা
-            time.sleep(3)
-            if proc.poll() is None:
-                deployment_status[folder_name] = "Running 🟢"
-            else:
-                deployment_status[folder_name] = "❌ Crashed Immediately"
-        else:
-            deployment_status[folder_name] = "❌ Start File Missing"
+        
+        # সব শেষে রান করা
+        run_bot_process(folder_name)
 
     except Exception as e:
         print(f"Error: {e}")
-        deployment_status[folder_name] = f"❌ Error: {str(e)[:20]}..."
+        deployment_status[folder_name] = "❌ Error Occurred"
 
 @app.route('/')
 def home():
@@ -122,47 +152,60 @@ def home():
 
 @app.route('/status')
 def status_api():
-    """AJAX দিয়ে লাইভ স্ট্যাটাস চেক করার এপিআই"""
     bots_data = []
-    
-    # ফোল্ডার লিস্ট থেকে স্ট্যাটাস জেনারেট করা
     if os.path.exists(CLONE_DIR):
         folders = os.listdir(CLONE_DIR)
         for folder in folders:
-            # বর্তমান স্ট্যাটাস কি?
             current_status = deployment_status.get(folder, "Unknown")
+            is_running = False
             
-            # যদি প্রসেস লিস্টে থাকে এবং রানিং থাকে
             if folder in running_processes:
                 if running_processes[folder].poll() is None:
-                    current_status = "Running 🟢"
+                    current_status = deployment_status.get(folder, "Running 🟢")
+                    is_running = True
                 else:
                     current_status = "Stopped 🔴"
-            
+            else:
+                current_status = "Stopped 🔴"
+
+            # কনফিগ থেকে পোর্ট বের করা (যদি থাকে)
+            port_info = bot_configs.get(folder, {}).get("port", "N/A")
+
             bots_data.append({
                 "name": folder,
-                "status": current_status
+                "status": current_status,
+                "running": is_running,
+                "port": port_info
             })
-    
     return jsonify(bots_data)
 
 @app.route('/deploy', methods=['POST'])
 def deploy():
     repo_link = request.form.get('repo_link')
     start_file = request.form.get('start_file') or "main.py"
+    custom_port = request.form.get('custom_port') # নতুন ইনপুট
     
-    if not repo_link: return "Link required", 400
+    if not repo_link: return "Link Required", 400
     
     repo_link = clean_url(repo_link)
     folder_name = repo_link.split("/")[-1].replace(".git", "")
 
     if folder_name in running_processes and running_processes[folder_name].poll() is None:
-        return f"{folder_name} is already running!", 400
+        return "Already Running", 400
 
     deployment_status[folder_name] = "⏳ Queued..."
-    thread = threading.Thread(target=install_and_run, args=(repo_link, start_file, folder_name))
+    thread = threading.Thread(target=install_and_run, args=(repo_link, start_file, folder_name, custom_port))
     thread.start()
 
+    return redirect(url_for('home'))
+
+@app.route('/start/<folder_name>')
+def start_bot(folder_name):
+    # শুধু রান করবে, ইন্সটল করার দরকার নেই
+    if folder_name not in running_processes or running_processes[folder_name].poll() is not None:
+        deployment_status[folder_name] = "⏳ Starting..."
+        thread = threading.Thread(target=run_bot_process, args=(folder_name,))
+        thread.start()
     return redirect(url_for('home'))
 
 @app.route('/stop/<folder_name>')
@@ -182,8 +225,10 @@ def delete_bot(folder_name):
         shutil.rmtree(repo_path)
     if folder_name in deployment_status:
         del deployment_status[folder_name]
+    if folder_name in bot_configs:
+        del bot_configs[folder_name]
     return redirect(url_for('home'))
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
-    app.run(host="0.0.0.0", port=port, debug=True)
+    app.run(host="0.0.0.0", port=port)
