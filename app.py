@@ -21,7 +21,7 @@ running_processes = {}
 deployment_status = {}   
 bot_configs = {}         
 
-# স্ট্যান্ডার্ড লাইব্রেরি
+# স্ট্যান্ডার্ড লাইব্রেরি (যা ইনস্টল হবে না)
 STANDARD_LIBS = {
     "os", "sys", "time", "json", "math", "random", "datetime", "subprocess", "threading",
     "collections", "re", "ftplib", "http", "urllib", "email", "shutil", "logging", "typing",
@@ -40,7 +40,8 @@ PIP_MAPPING = {
     "aiogram": "aiogram",
     "googleapiclient": "google-api-python-client",
     "youtube_dl": "youtube_dl",
-    "yt_dlp": "yt_dlp"
+    "yt_dlp": "yt_dlp",
+    "pymongo": "pymongo[srv]"
 }
 
 # --- হেল্পার ফাংশন ---
@@ -79,13 +80,13 @@ def get_imports_from_folder(folder_path):
     return imports
 
 def run_bot_process(folder_name):
-    """বট স্টার্ট করার ফাংশন (ENV সাপোর্ট সহ)"""
+    """বট স্টার্ট করার ফাংশন (Anti-Hang / Log File Fix সহ)"""
     repo_path = os.path.join(CLONE_DIR, folder_name)
     config = bot_configs.get(folder_name, {})
     
     start_file = config.get("start_file", "main.py")
     assigned_port = config.get("port", str(random.randint(5001, 9999)))
-    custom_env_vars = config.get("env", {}) # সেভ করা Env Vars
+    custom_env_vars = config.get("env", {}) 
 
     run_path = os.path.join(repo_path, start_file)
     if not os.path.exists(run_path):
@@ -94,26 +95,41 @@ def run_bot_process(folder_name):
 
     deployment_status[folder_name] = f"🚀 Starting on Port {assigned_port}..."
     
-    # এনভায়রনমেন্ট সেট করা (System Env + Custom Env + PORT)
+    # এনভায়রনমেন্ট সেট করা
     bot_env = os.environ.copy()
-    bot_env.update(custom_env_vars) # স্ট্রিং সেশন বা অন্য ভেরিয়েবল অ্যাড করা হলো
+    bot_env.update(custom_env_vars)
     bot_env["PORT"] = str(assigned_port)
     
-    proc = subprocess.Popen(["python", start_file], cwd=repo_path, env=bot_env)
-    running_processes[folder_name] = proc
+    # --- CRITICAL FIX: লগ ফাইলে সেভ করা ---
+    # পাইপ ব্যবহার না করে ফাইলে লগ করলে হ্যাং হবে না
+    log_file_path = os.path.join(repo_path, "bot_logs.txt")
     
-    time.sleep(5)
-    if proc.poll() is None:
-        deployment_status[folder_name] = f"Running 🟢 (Port: {assigned_port})"
-    else:
-        deployment_status[folder_name] = "❌ Crashed (Check Logs)"
+    try:
+        log_file = open(log_file_path, "a", encoding="utf-8") # Append mode
+        
+        proc = subprocess.Popen(
+            ["python", start_file],
+            cwd=repo_path,
+            env=bot_env,
+            stdout=log_file,  # stdout ফাইলে যাবে
+            stderr=log_file   # stderr ফাইলে যাবে
+        )
+        running_processes[folder_name] = proc
+        
+        time.sleep(5)
+        if proc.poll() is None:
+            deployment_status[folder_name] = f"Running 🟢 (Port: {assigned_port})"
+        else:
+            deployment_status[folder_name] = "❌ Crashed (View bot_logs.txt)"
+            
+    except Exception as e:
+        deployment_status[folder_name] = f"❌ Error: {str(e)}"
 
 def install_and_run(repo_link, start_file, folder_name, custom_port, env_text):
     """ইন্সটল এবং সেটআপ"""
     repo_path = os.path.join(CLONE_DIR, folder_name)
     port_to_use = custom_port if custom_port else str(random.randint(5001, 9999))
     
-    # Env টেক্সট পার্স করা
     env_vars = parse_env_text(env_text)
 
     # কনফিগ সেভ
@@ -235,19 +251,15 @@ def status_api():
             })
     return jsonify(bots_data)
 
-# --- নতুন কনফিগারেশন রুট ---
 @app.route('/get_config/<folder_name>')
 def get_config(folder_name):
-    """বটের বর্তমান Env Vars রিটার্ন করবে"""
     config = bot_configs.get(folder_name, {})
     env_vars = config.get("env", {})
-    # ডিকশনারি থেকে টেক্সটে কনভার্ট
     env_text = "\n".join([f"{k}={v}" for k, v in env_vars.items()])
     return jsonify({"env": env_text})
 
 @app.route('/update_config/<folder_name>', methods=['POST'])
 def update_config(folder_name):
-    """কনফিগারেশন আপডেট করবে"""
     if folder_name in bot_configs:
         env_text = request.form.get("env_vars", "")
         bot_configs[folder_name]["env"] = parse_env_text(env_text)
@@ -259,7 +271,7 @@ def deploy():
     repo_link = request.form.get('repo_link')
     start_file = request.form.get('start_file') or "main.py"
     custom_port = request.form.get('custom_port')
-    env_text = request.form.get('env_vars') # নতুন Env ইনপুট
+    env_text = request.form.get('env_vars')
     
     if not repo_link: return "Link Required", 400
     
@@ -286,7 +298,12 @@ def start_bot(folder_name):
 @app.route('/stop/<folder_name>')
 def stop_bot(folder_name):
     if folder_name in running_processes:
-        running_processes[folder_name].terminate()
+        try:
+            running_processes[folder_name].terminate()
+            running_processes[folder_name].wait(timeout=2) 
+        except:
+            running_processes[folder_name].kill()
+            
         del running_processes[folder_name]
     deployment_status[folder_name] = "Stopped 🔴"
     return redirect(url_for('home'))
@@ -297,7 +314,10 @@ def delete_bot(folder_name):
         stop_bot(folder_name)
     repo_path = os.path.join(CLONE_DIR, folder_name)
     if os.path.exists(repo_path):
-        shutil.rmtree(repo_path)
+        try:
+            shutil.rmtree(repo_path)
+        except:
+            pass
     if folder_name in deployment_status: del deployment_status[folder_name]
     if folder_name in bot_configs: del bot_configs[folder_name]
     return redirect(url_for('home'))
