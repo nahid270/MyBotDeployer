@@ -19,6 +19,9 @@
         .modal-content { background-color: #1f1f1f; color: white; border: 1px solid #444; }
         .modal-header { border-bottom: 1px solid #333; }
         .modal-footer { border-top: 1px solid #333; }
+        .status-running { color: #00ff88; font-weight: bold; }
+        .status-stopped { color: #ff4d4d; font-weight: bold; }
+        .status-loading { color: #ffcc00; font-weight: bold; }
     </style>
 </head>
 <body>
@@ -46,11 +49,10 @@
                     </div>
                 </div>
                 
-                <!-- Environment Variables Section -->
                 <div class="mb-3">
-                    <label class="form-label text-secondary small">Environment Variables / Config (String Session, URL, Token)</label>
-                    <textarea name="env_vars" class="form-control font-monospace" rows="3" placeholder="STRING_SESSION=xyz...&#10;API_ID=12345&#10;API_HASH=abcdef..."></textarea>
-                    <div class="form-text text-secondary">Enter each variable on a new line (KEY=VALUE).</div>
+                    <label class="form-label text-secondary small">Environment Variables / Config (KEY=VALUE)</label>
+                    <textarea name="env_vars" class="form-control font-monospace" rows="3" placeholder="STRING_SESSION=xyz...&#10;BOT_TOKEN=123:ABC..."></textarea>
+                    <div class="form-text text-secondary">Enter each variable on a new line.</div>
                 </div>
 
                 <button type="submit" class="btn btn-success w-100 fw-bold">⚡ INITIATE DEPLOYMENT</button>
@@ -94,7 +96,7 @@
             </div>
             <div class="modal-footer">
                 <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
-                <button type="button" class="btn btn-primary" onclick="saveConfig()">Save Changes</button>
+                <button type="button" class="btn btn-primary" onclick="saveConfig()">Save & Apply</button>
             </div>
         </div>
     </div>
@@ -108,29 +110,27 @@
                 rows = '<tr><td colspan="4" class="text-center text-secondary p-4">No bots deployed. Start one above!</td></tr>';
             } else {
                 $.each(data, function(key, bot) {
-                    let statusClass = bot.status.includes("Running") ? "text-success" : "text-warning";
-                    if(bot.status.includes("Stopped") || bot.status.includes("Crashed")) statusClass = "text-danger";
+                    let statusClass = "status-loading";
+                    if(bot.status.includes("Running")) statusClass = "status-running";
+                    if(bot.status.includes("Stopped") || bot.status.includes("Crashed")) statusClass = "status-stopped";
 
-                    let mainBtn = '';
-                    let webBtn = '';
-
-                    if (bot.running) {
-                        mainBtn = `<a href="/stop/${bot.name}" class="btn btn-warning btn-sm fw-bold">🛑 Stop</a>`;
-                        webBtn = `<a href="/view/${bot.name}/" target="_blank" class="btn btn-web btn-sm fw-bold ms-1">🔗 Open Web</a>`;
-                    } else {
-                        mainBtn = `<a href="/start/${bot.name}" class="btn btn-success btn-sm fw-bold">▶️ Start</a>`;
-                        webBtn = `<button class="btn btn-secondary btn-sm ms-1" disabled>🔗 Web</button>`;
-                    }
+                    let mainBtn = bot.running 
+                        ? `<a href="/stop/${bot.name}" class="btn btn-warning btn-sm fw-bold">🛑 Stop</a>`
+                        : `<a href="/start/${bot.name}" class="btn btn-success btn-sm fw-bold">▶️ Start</a>`;
                     
+                    let webBtn = bot.running
+                        ? `<a href="/view/${bot.name}/" target="_blank" class="btn btn-web btn-sm fw-bold ms-1">🔗 Web</a>`
+                        : `<button class="btn btn-secondary btn-sm ms-1" disabled>🔗 Web</button>`;
+
                     rows += `
                     <tr>
                         <td class="fw-bold text-white">${bot.name}</td>
                         <td class="text-info font-monospace">${bot.port}</td>
-                        <td class="${statusClass} fw-bold small">${bot.status}</td>
+                        <td class="${statusClass} small">${bot.status}</td>
                         <td>
                             ${mainBtn}
                             ${webBtn}
-                            <button class="btn btn-info btn-sm ms-1 fw-bold" onclick="openConfig('${bot.name}')">⚙️ Config</button>
+                            <button class="btn btn-info btn-sm ms-1 fw-bold" onclick="openConfig('${bot.name}')">⚙️</button>
                             <a href="/delete/${bot.name}" class="btn btn-danger btn-sm ms-2">🗑️</a>
                         </td>
                     </tr>`;
@@ -140,7 +140,6 @@
         });
     }
 
-    // কনফিগ মডাল ওপেন করা
     function openConfig(botName) {
         $('#edit-bot-name').val(botName);
         $.getJSON('/get_config/' + botName, function(data) {
@@ -149,16 +148,15 @@
         });
     }
 
-    // কনফিগ সেভ করা
     function saveConfig() {
         let botName = $('#edit-bot-name').val();
         let envData = $('#edit-env-vars').val();
         
         $.post('/update_config/' + botName, { env_vars: envData }, function(resp) {
-            alert("Configuration Saved! Please Restart the bot.");
-            $('#configModal').modal('hide'); // jQuery দিয়ে মডাল হাইড করার চেষ্টা (যদি সমস্যা হয়, bootstrap instance ব্যবহার হবে)
-             // বাটন ক্লিক করে বন্ধ করা ভালো
-             document.querySelector('#configModal .btn-close').click();
+            alert("✅ Config Saved! Please Stop & Start the bot to apply changes.");
+            const modalEl = document.getElementById('configModal');
+            const modal = bootstrap.Modal.getInstance(modalEl);
+            modal.hide();
         });
     }
 
