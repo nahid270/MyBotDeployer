@@ -17,11 +17,11 @@ if not os.path.exists(CLONE_DIR):
     os.makedirs(CLONE_DIR)
 
 # মেমোরি স্টোরেজ
-running_processes = {}   # প্রসেস অবজেক্ট
-deployment_status = {}   # স্ট্যাটাস মেসেজ
-bot_configs = {}         # পোর্ট এবং ফাইল ইনফো
+running_processes = {}   
+deployment_status = {}   
+bot_configs = {}         
 
-# স্ট্যান্ডার্ড লাইব্রেরি (যা ইনস্টল হবে না)
+# স্ট্যান্ডার্ড লাইব্রেরি
 STANDARD_LIBS = {
     "os", "sys", "time", "json", "math", "random", "datetime", "subprocess", "threading",
     "collections", "re", "ftplib", "http", "urllib", "email", "shutil", "logging", "typing",
@@ -48,8 +48,18 @@ PIP_MAPPING = {
 def clean_url(url):
     return url.strip().rstrip("/")
 
+def parse_env_text(text):
+    """টেক্সট বক্স থেকে Env Variables ডিকশনারিতে কনভার্ট করা"""
+    env_vars = {}
+    if not text: return env_vars
+    for line in text.split('\n'):
+        line = line.strip()
+        if '=' in line and not line.startswith('#'):
+            key, value = line.split('=', 1)
+            env_vars[key.strip()] = value.strip()
+    return env_vars
+
 def get_imports_from_folder(folder_path):
-    """কোড স্ক্যান করে লাইব্রেরি ডিটেক্ট করা"""
     imports = set()
     for root, dirs, files in os.walk(folder_path):
         for file in files:
@@ -69,14 +79,14 @@ def get_imports_from_folder(folder_path):
     return imports
 
 def run_bot_process(folder_name):
-    """বট স্টার্ট করার ফাংশন"""
+    """বট স্টার্ট করার ফাংশন (ENV সাপোর্ট সহ)"""
     repo_path = os.path.join(CLONE_DIR, folder_name)
     config = bot_configs.get(folder_name, {})
     
     start_file = config.get("start_file", "main.py")
     assigned_port = config.get("port", str(random.randint(5001, 9999)))
+    custom_env_vars = config.get("env", {}) # সেভ করা Env Vars
 
-    # ফাইল চেক
     run_path = os.path.join(repo_path, start_file)
     if not os.path.exists(run_path):
         deployment_status[folder_name] = "⚠️ Start File Missing"
@@ -84,11 +94,11 @@ def run_bot_process(folder_name):
 
     deployment_status[folder_name] = f"🚀 Starting on Port {assigned_port}..."
     
-    # এনভায়রনমেন্ট সেট করা (PORT)
+    # এনভায়রনমেন্ট সেট করা (System Env + Custom Env + PORT)
     bot_env = os.environ.copy()
+    bot_env.update(custom_env_vars) # স্ট্রিং সেশন বা অন্য ভেরিয়েবল অ্যাড করা হলো
     bot_env["PORT"] = str(assigned_port)
     
-    # প্রসেস রান
     proc = subprocess.Popen(["python", start_file], cwd=repo_path, env=bot_env)
     running_processes[folder_name] = proc
     
@@ -98,16 +108,20 @@ def run_bot_process(folder_name):
     else:
         deployment_status[folder_name] = "❌ Crashed (Check Logs)"
 
-def install_and_run(repo_link, start_file, folder_name, custom_port):
+def install_and_run(repo_link, start_file, folder_name, custom_port, env_text):
     """ইন্সটল এবং সেটআপ"""
     repo_path = os.path.join(CLONE_DIR, folder_name)
     port_to_use = custom_port if custom_port else str(random.randint(5001, 9999))
+    
+    # Env টেক্সট পার্স করা
+    env_vars = parse_env_text(env_text)
 
     # কনফিগ সেভ
     bot_configs[folder_name] = {
         "link": repo_link,
         "start_file": start_file,
-        "port": port_to_use
+        "port": port_to_use,
+        "env": env_vars
     }
 
     try:
@@ -115,7 +129,6 @@ def install_and_run(repo_link, start_file, folder_name, custom_port):
             deployment_status[folder_name] = "⬇️ Cloning Repo..."
             subprocess.run(["git", "clone", repo_link, repo_path], check=True)
         
-        # Requirements Install
         req_file = os.path.join(repo_path, "requirements.txt")
         if os.path.exists(req_file):
             deployment_status[folder_name] = "📦 Installing Requirements..."
@@ -132,7 +145,6 @@ def install_and_run(repo_link, start_file, folder_name, custom_port):
                 deployment_status[folder_name] = f"📦 Auto-Installing Libs..."
                 subprocess.run(["pip", "install"] + packages_to_install, cwd=repo_path, stdout=subprocess.DEVNULL)
 
-        # Start File Auto-Correction
         run_path = os.path.join(repo_path, start_file)
         if not os.path.exists(run_path):
             possible_files = ["app.py", "main.py", "bot.py", "start.py", "run.py"]
@@ -154,65 +166,47 @@ def install_and_run(repo_link, start_file, folder_name, custom_port):
 def home():
     return render_template('index.html')
 
-# --- 🚀 সুপার প্রক্সি ভিউয়ার (অ্যাডমিন প্যানেল ফিক্স সহ) ---
 @app.route('/view/<folder_name>/', defaults={'path': ''}, methods=['GET', 'POST', 'PUT', 'DELETE'])
 @app.route('/view/<folder_name>/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE'])
 def proxy_view(folder_name, path):
     config = bot_configs.get(folder_name)
-    
     if not config or folder_name not in running_processes:
         return "Bot is not running!", 404
 
     port = config.get("port")
     base_url = f"http://127.0.0.1:{port}"
     target_url = f"{base_url}/{path}"
-
-    if request.query_string:
-        target_url += f"?{request.query_string.decode('utf-8')}"
+    if request.query_string: target_url += f"?{request.query_string.decode('utf-8')}"
 
     try:
-        # ১. রিকোয়েস্ট ফরোয়ার্ড করা
         resp = requests.request(
             method=request.method,
             url=target_url,
             headers={key: value for (key, value) in request.headers if key.lower() != 'host'},
             data=request.get_data(),
             cookies=request.cookies,
-            allow_redirects=False # অটো রিডাইরেক্ট বন্ধ
+            allow_redirects=False
         )
-
-        # ২. রিডাইরেক্ট ফিক্স (Location Header Rewrite)
         if resp.status_code in [301, 302, 303, 307, 308]:
             location = resp.headers.get('Location')
             if location:
-                if base_url in location:
-                    location = location.replace(base_url, "")
-                if location.startswith("/"):
-                    new_location = f"/view/{folder_name}{location}"
-                else:
-                    new_location = f"/view/{folder_name}/{location}"
-                return redirect(new_location, code=resp.status_code)
+                if base_url in location: location = location.replace(base_url, "")
+                new_loc = f"/view/{folder_name}{location}" if location.startswith("/") else f"/view/{folder_name}/{location}"
+                return redirect(new_loc, code=resp.status_code)
 
-        # ৩. হেডার ফিল্টার করা
         excluded_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection', 'location']
         headers = [(name, value) for (name, value) in resp.headers.items() if name.lower() not in excluded_headers]
 
-        # ৪. HTML কন্টেন্ট রিরাইট (CSS/JS/Form Action ফিক্স)
         content = resp.content
         if 'text/html' in resp.headers.get('Content-Type', ''):
             decoded_content = content.decode('utf-8', errors='ignore')
-            
-            # HTML এর ভেতরের রুট লিংকগুলো পরিবর্তন করে প্রক্সি লিংক বানানো
             decoded_content = decoded_content.replace('href="/', f'href="/view/{folder_name}/')
             decoded_content = decoded_content.replace('src="/', f'src="/view/{folder_name}/')
             decoded_content = decoded_content.replace('action="/', f'action="/view/{folder_name}/')
-            # ফর্ম মেথড ফিক্স (যদি দরকার হয়)
             decoded_content = decoded_content.replace("action='/", f"action='/view/{folder_name}/")
-            
             content = decoded_content.encode('utf-8')
 
         return Response(content, resp.status_code, headers)
-
     except Exception as e:
         return f"Proxy Error: {e}", 502
 
@@ -224,7 +218,6 @@ def status_api():
         for folder in folders:
             current_status = deployment_status.get(folder, "Unknown")
             is_running = False
-            
             if folder in running_processes:
                 if running_processes[folder].poll() is None:
                     current_status = deployment_status.get(folder, "Running 🟢")
@@ -242,11 +235,31 @@ def status_api():
             })
     return jsonify(bots_data)
 
+# --- নতুন কনফিগারেশন রুট ---
+@app.route('/get_config/<folder_name>')
+def get_config(folder_name):
+    """বটের বর্তমান Env Vars রিটার্ন করবে"""
+    config = bot_configs.get(folder_name, {})
+    env_vars = config.get("env", {})
+    # ডিকশনারি থেকে টেক্সটে কনভার্ট
+    env_text = "\n".join([f"{k}={v}" for k, v in env_vars.items()])
+    return jsonify({"env": env_text})
+
+@app.route('/update_config/<folder_name>', methods=['POST'])
+def update_config(folder_name):
+    """কনফিগারেশন আপডেট করবে"""
+    if folder_name in bot_configs:
+        env_text = request.form.get("env_vars", "")
+        bot_configs[folder_name]["env"] = parse_env_text(env_text)
+        return "Updated", 200
+    return "Not Found", 404
+
 @app.route('/deploy', methods=['POST'])
 def deploy():
     repo_link = request.form.get('repo_link')
     start_file = request.form.get('start_file') or "main.py"
     custom_port = request.form.get('custom_port')
+    env_text = request.form.get('env_vars') # নতুন Env ইনপুট
     
     if not repo_link: return "Link Required", 400
     
@@ -257,7 +270,7 @@ def deploy():
         return "Already Running", 400
 
     deployment_status[folder_name] = "⏳ Queued..."
-    thread = threading.Thread(target=install_and_run, args=(repo_link, start_file, folder_name, custom_port))
+    thread = threading.Thread(target=install_and_run, args=(repo_link, start_file, folder_name, custom_port, env_text))
     thread.start()
 
     return redirect(url_for('home'))
