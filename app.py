@@ -7,28 +7,51 @@ import ast
 import time
 import random
 import requests
+import json  # <--- নতুন যুক্ত করা হয়েছে
 from flask import Flask, render_template, request, redirect, url_for, jsonify, Response
 
 app = Flask(__name__)
 
 # --- কনফিগারেশন ---
 CLONE_DIR = "cloned_repos"
+DATA_FILE = "bots_data.json"  # <--- ডাটাবেস ফাইল
+
 if not os.path.exists(CLONE_DIR):
     os.makedirs(CLONE_DIR)
 
-# মেমোরি স্টোরেজ
+# মেমোরি স্টোরেজ (এখন আমরা ফাইল থেকে লোড করব)
 running_processes = {}   
 deployment_status = {}   
 bot_configs = {}         
 
-# স্ট্যান্ডার্ড লাইব্রেরি (যা ইনস্টল হবে না)
+# --- ডাটাবেস লোড এবং সেভ ফাংশন ---
+def load_data():
+    """বট চালু হওয়ার সময় আগের ডাটা লোড করা"""
+    global bot_configs
+    if os.path.exists(DATA_FILE):
+        try:
+            with open(DATA_FILE, "r", encoding="utf-8") as f:
+                bot_configs = json.load(f)
+        except:
+            bot_configs = {}
+    else:
+        bot_configs = {}
+
+def save_data():
+    """যেকোন পরিবর্তনের পর ডাটা সেভ করা"""
+    try:
+        with open(DATA_FILE, "w", encoding="utf-8") as f:
+            json.dump(bot_configs, f, indent=4)
+    except Exception as e:
+        print(f"Error saving data: {e}")
+
+# স্ট্যান্ডার্ড লাইব্রেরি
 STANDARD_LIBS = {
     "os", "sys", "time", "json", "math", "random", "datetime", "subprocess", "threading",
     "collections", "re", "ftplib", "http", "urllib", "email", "shutil", "logging", "typing",
     "traceback", "asyncio", "html", "socket", "base64", "io", "platform", "signal", "flask"
 }
 
-# লাইব্রেরি নাম ম্যাপিং
 PIP_MAPPING = {
     "telebot": "pyTelegramBotAPI",
     "telegram": "python-telegram-bot",
@@ -50,7 +73,6 @@ def clean_url(url):
     return url.strip().rstrip("/")
 
 def parse_env_text(text):
-    """টেক্সট বক্স থেকে Env Variables ডিকশনারিতে কনভার্ট করা"""
     env_vars = {}
     if not text: return env_vars
     for line in text.split('\n'):
@@ -80,7 +102,7 @@ def get_imports_from_folder(folder_path):
     return imports
 
 def run_bot_process(folder_name):
-    """বট স্টার্ট করার ফাংশন (Anti-Hang / Log File Fix সহ)"""
+    """বট স্টার্ট করার ফাংশন"""
     repo_path = os.path.join(CLONE_DIR, folder_name)
     config = bot_configs.get(folder_name, {})
     
@@ -93,26 +115,27 @@ def run_bot_process(folder_name):
         deployment_status[folder_name] = "⚠️ Start File Missing"
         return
 
+    # যদি অলরেডি রানিং থাকে তবে নতুন করে রান করার দরকার নেই
+    if folder_name in running_processes and running_processes[folder_name].poll() is None:
+        return
+
     deployment_status[folder_name] = f"🚀 Starting on Port {assigned_port}..."
     
-    # এনভায়রনমেন্ট সেট করা
     bot_env = os.environ.copy()
     bot_env.update(custom_env_vars)
     bot_env["PORT"] = str(assigned_port)
     
-    # --- CRITICAL FIX: লগ ফাইলে সেভ করা ---
-    # পাইপ ব্যবহার না করে ফাইলে লগ করলে হ্যাং হবে না
     log_file_path = os.path.join(repo_path, "bot_logs.txt")
     
     try:
-        log_file = open(log_file_path, "a", encoding="utf-8") # Append mode
+        log_file = open(log_file_path, "a", encoding="utf-8")
         
         proc = subprocess.Popen(
             ["python", start_file],
             cwd=repo_path,
             env=bot_env,
-            stdout=log_file,  # stdout ফাইলে যাবে
-            stderr=log_file   # stderr ফাইলে যাবে
+            stdout=log_file,
+            stderr=log_file
         )
         running_processes[folder_name] = proc
         
@@ -126,19 +149,19 @@ def run_bot_process(folder_name):
         deployment_status[folder_name] = f"❌ Error: {str(e)}"
 
 def install_and_run(repo_link, start_file, folder_name, custom_port, env_text):
-    """ইন্সটল এবং সেটআপ"""
     repo_path = os.path.join(CLONE_DIR, folder_name)
     port_to_use = custom_port if custom_port else str(random.randint(5001, 9999))
     
     env_vars = parse_env_text(env_text)
 
-    # কনফিগ সেভ
+    # কনফিগ আপডেট এবং সেভ
     bot_configs[folder_name] = {
         "link": repo_link,
         "start_file": start_file,
         "port": port_to_use,
         "env": env_vars
     }
+    save_data() # <--- ডাটাবেসে সেভ করা হলো
 
     try:
         if not os.path.exists(repo_path):
@@ -168,6 +191,7 @@ def install_and_run(repo_link, start_file, folder_name, custom_port, env_text):
                 if os.path.exists(os.path.join(repo_path, f)):
                     start_file = f
                     bot_configs[folder_name]["start_file"] = f
+                    save_data() # <--- স্টার্ট ফাইল আপডেট হলে আবার সেভ
                     break
         
         run_bot_process(folder_name)
@@ -175,6 +199,19 @@ def install_and_run(repo_link, start_file, folder_name, custom_port, env_text):
     except Exception as e:
         print(f"Error: {e}")
         deployment_status[folder_name] = "❌ Error Occurred"
+
+# --- আগের সেশন রিস্টোর করা ---
+def restore_sessions():
+    """সার্ভার চালু হলে পুরনো বটগুলো আবার চালু করবে"""
+    time.sleep(2) # Flask চালু হওয়ার জন্য একটু সময় দেওয়া
+    print("🔄 Restoring previous sessions...")
+    load_data() # ফাইল থেকে ডাটা লোড
+    for folder_name in bot_configs:
+        path = os.path.join(CLONE_DIR, folder_name)
+        if os.path.exists(path):
+            threading.Thread(target=run_bot_process, args=(folder_name,)).start()
+        else:
+            print(f"⚠️ Folder missing for {folder_name}, skipping.")
 
 # --- ROUTES ---
 
@@ -186,9 +223,10 @@ def home():
 @app.route('/view/<folder_name>/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE'])
 def proxy_view(folder_name, path):
     config = bot_configs.get(folder_name)
-    if not config or folder_name not in running_processes:
-        return "Bot is not running!", 404
-
+    # প্রসেস যদি ক্র্যাশ করে থাকে তবুও যাতে কনফিগ থাকে
+    if not config:
+        return "Bot config not found!", 404
+        
     port = config.get("port")
     base_url = f"http://127.0.0.1:{port}"
     target_url = f"{base_url}/{path}"
@@ -224,31 +262,32 @@ def proxy_view(folder_name, path):
 
         return Response(content, resp.status_code, headers)
     except Exception as e:
-        return f"Proxy Error: {e}", 502
+        return f"Proxy Error (Bot might be stopped): {e}", 502
 
 @app.route('/status')
 def status_api():
     bots_data = []
-    if os.path.exists(CLONE_DIR):
-        folders = os.listdir(CLONE_DIR)
-        for folder in folders:
-            current_status = deployment_status.get(folder, "Unknown")
-            is_running = False
-            if folder in running_processes:
-                if running_processes[folder].poll() is None:
-                    current_status = deployment_status.get(folder, "Running 🟢")
-                    is_running = True
-                else:
-                    current_status = "Stopped 🔴"
+    # ডাটাবেস থেকে কনফিগ নিয়ে লুপ চালাবো
+    for folder, config in bot_configs.items():
+        current_status = deployment_status.get(folder, "Unknown")
+        is_running = False
+        
+        if folder in running_processes:
+            if running_processes[folder].poll() is None:
+                current_status = deployment_status.get(folder, "Running 🟢")
+                is_running = True
             else:
                 current_status = "Stopped 🔴"
+        else:
+            # যদি কনফিগ থাকে কিন্তু প্রসেস না থাকে
+            current_status = deployment_status.get(folder, "Stopped 🔴")
 
-            bots_data.append({
-                "name": folder,
-                "status": current_status,
-                "running": is_running,
-                "port": bot_configs.get(folder, {}).get("port", "N/A")
-            })
+        bots_data.append({
+            "name": folder,
+            "status": current_status,
+            "running": is_running,
+            "port": config.get("port", "N/A")
+        })
     return jsonify(bots_data)
 
 @app.route('/get_config/<folder_name>')
@@ -263,6 +302,7 @@ def update_config(folder_name):
     if folder_name in bot_configs:
         env_text = request.form.get("env_vars", "")
         bot_configs[folder_name]["env"] = parse_env_text(env_text)
+        save_data() # <--- আপডেটের পর সেভ
         return "Updated", 200
     return "Not Found", 404
 
@@ -319,9 +359,14 @@ def delete_bot(folder_name):
         except:
             pass
     if folder_name in deployment_status: del deployment_status[folder_name]
-    if folder_name in bot_configs: del bot_configs[folder_name]
+    if folder_name in bot_configs: 
+        del bot_configs[folder_name]
+        save_data() # <--- ডিলিট করার পর ডাটাবেস আপডেট
     return redirect(url_for('home'))
 
 if __name__ == "__main__":
+    # অ্যাপ চালু হওয়ার সময় অটোমেটিক আগের বটগুলো স্টার্ট হবে
+    threading.Thread(target=restore_sessions).start()
+    
     port = int(os.environ.get("PORT", 8000))
     app.run(host="0.0.0.0", port=port)
