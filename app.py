@@ -12,6 +12,12 @@ import psutil
 from functools import wraps
 from flask import Flask, render_template, request, redirect, url_for, jsonify, Response
 
+# লিনাক্স সিস্টেমে সাব-প্রসেসের মেমোরি কন্ট্রোল করার জন্য মডিউল ইম্পোর্ট
+try:
+    import resource
+except ImportError:
+    resource = None
+
 app = Flask(__name__)
 
 # --- সিকিউরিটি (লগিন সিস্টেম) ---
@@ -107,6 +113,15 @@ def parse_env_text(text):
             env_vars[key.strip()] = value.strip()
     return env_vars
 
+def set_process_limits(max_ram_mb):
+    """ সাব-প্রসেসের মেমোরি লিমিটেশন সেট করার লিনাক্স মেকানিজম """
+    def limit_memory():
+        if resource is not None:
+            max_bytes = int(max_ram_mb) * 1024 * 1024
+            # RLIMIT_AS দিয়ে কন্টেইনারের ভার্চুয়াল মেমোরি বা এড্রেস স্পেস কন্ট্রোল করা হয়
+            resource.setrlimit(resource.RLIMIT_AS, (max_bytes, max_bytes))
+    return limit_memory
+
 def pull_latest_code(folder_name):
     repo_path = os.path.join(CLONE_DIR, folder_name)
     if os.path.exists(os.path.join(repo_path, ".git")):
@@ -127,6 +142,7 @@ def run_bot_process(folder_name):
     
     start_file = config.get("start_file", "main.py")
     assigned_port = config.get("port", str(random.randint(5001, 9999)))
+    max_ram_mb = config.get("max_ram", "80") # মেমোরি লিমিট লোড
     
     run_path = os.path.join(repo_path, start_file)
     if not os.path.exists(run_path):
@@ -144,7 +160,20 @@ def run_bot_process(folder_name):
     log_file_path = os.path.join(repo_path, "bot_logs.txt")
     try:
         log_file = open(log_file_path, "a", encoding="utf-8")
-        proc = subprocess.Popen(["python", start_file], cwd=repo_path, env=bot_env, stdout=log_file, stderr=subprocess.STDOUT)
+        
+        # সাবপ্রসেস তৈরির কনফিগারেশন সেটআপ
+        popen_kwargs = {
+            "cwd": repo_path, 
+            "env": bot_env, 
+            "stdout": log_file, 
+            "stderr": subprocess.STDOUT
+        }
+        
+        # যদি লিনাক্স ওএস হয় এবং resource মডিউল অ্যাভেইলেবল থাকে, তবে মেমোরি লিমিট লাগু হবে
+        if os.name != 'nt' and resource is not None:
+            popen_kwargs["preexec_fn"] = set_process_limits(max_ram_mb)
+
+        proc = subprocess.Popen(["python", start_file], **popen_kwargs)
         running_processes[folder_name] = proc
         time.sleep(3)
         if proc.poll() is None: 
@@ -154,19 +183,19 @@ def run_bot_process(folder_name):
     except Exception as e:
         deployment_status[folder_name] = f"❌ Error: {str(e)}"
 
-def install_and_run(repo_link, start_file, folder_name, custom_port, env_text_or_dict):
+def install_and_run(repo_link, start_file, folder_name, custom_port, env_text_or_dict, max_ram="80"):
     repo_path = os.path.join(CLONE_DIR, folder_name)
     
-    # এনভায়রনমেন্ট হ্যান্ডলিং (ডিপ্লয় থেকে আসলে টেক্সট, রিস্টোর থেকে আসলে ডিকশনারি)
     if isinstance(env_text_or_dict, str):
         env_vars = parse_env_text(env_text_or_dict)
     else:
         env_vars = env_text_or_dict
 
-    # কনফিগার আপডেট ও সেভ
+    # কনফিগারে max_ram লিমিট সেভ করা হচ্ছে
     bot_configs[folder_name] = {
         "link": repo_link, "start_file": start_file, 
-        "port": custom_port if custom_port else str(random.randint(5001, 9999)), "env": env_vars
+        "port": custom_port if custom_port else str(random.randint(5001, 9999)), 
+        "env": env_vars, "max_ram": str(max_ram)
     }
     save_data(folder_name) 
 
@@ -183,14 +212,13 @@ def install_and_run(repo_link, start_file, folder_name, custom_port, env_text_or
     except Exception as e:
         deployment_status[folder_name] = "❌ Setup Failed"
 
-# --- অটো-রিস্টার্ট এবং Koyeb রিস্টোর (উন্নত ভার্সন) ---
+# --- অটো-রিস্টার্ট এবং Koyeb রিস্টোর ---
 def auto_restart_monitor():
     """ক্র্যাশ করলে অটোমেটিক রিস্টার্ট করবে"""
     while True:
         time.sleep(20)
         for folder, proc in list(running_processes.items()):
             if proc.poll() is not None:
-                # যদি স্ট্যাটাস Stopped বা Deleted না হয়, তার মানে ক্র্যাশ করেছে
                 status = deployment_status.get(folder, "")
                 if "Stopped" not in status and "Deleted" not in status:
                     run_bot_process(folder)
@@ -198,7 +226,7 @@ def auto_restart_monitor():
 def restore_sessions():
     """সার্ভার রিস্টার্ট নিলে ডাটাবেস থেকে সব বট রিস্টোর করবে"""
     print("🔄 Initializing Session Restoration...")
-    time.sleep(10) # ডাটাবেস এবং নেটওয়ার্ক স্টেবল হওয়ার সময়
+    time.sleep(10) 
     load_data() 
     
     if not bot_configs:
@@ -207,16 +235,15 @@ def restore_sessions():
 
     for folder_name, config in list(bot_configs.items()):
         path = os.path.join(CLONE_DIR, folder_name)
-        # যদি ফাইল না থাকে (Koyeb/Heroku restart fix), তবে পুরো রি-ইনস্টল হবে
+        max_ram = config.get("max_ram", "80")
         if not os.path.exists(path):
             print(f"📦 Re-cloning lost bot: {folder_name}")
             threading.Thread(target=install_and_run, args=(
-                config['link'], config['start_file'], folder_name, config['port'], config['env']
+                config['link'], config['start_file'], folder_name, config['port'], config['env'], max_ram
             )).start()
         else:
-            # ফাইল থাকলে শুধু প্রসেস রান করবে
             threading.Thread(target=run_bot_process, args=(folder_name,)).start()
-        time.sleep(5) # প্রতিটি বটের মাঝে বিরতি যাতে র‍্যাম ক্রাশ না করে
+        time.sleep(5) 
 
 # --- ROUTES ---
 
@@ -247,9 +274,38 @@ def status_api():
 
         bots_data.append({
             "name": folder, "status": current_status, "running": is_running,
-            "port": config.get("port", "N/A"), "ram": ram_usage, "cpu": cpu_usage
+            "port": config.get("port", "N/A"), "ram": ram_usage, "cpu": cpu_usage,
+            "max_ram": config.get("max_ram", "80") # স্ট্যাটাস এপিআই-তে ম্যাক্স র‍্যাম যোগ করা হলো
         })
     return jsonify(bots_data)
+
+@app.route('/system_usage')
+@requires_auth
+def system_usage():
+    """ Koyeb সার্ভারের মেমোরি ব্যবহারের তথ্য (মেইন প্যানেল + সকল রানিং বট) """
+    try:
+        # ১. মেইন প্যানেল (Flask App)-এর ব্যবহৃত মেমোরি
+        main_process = psutil.Process(os.getpid())
+        total_ram = main_process.memory_info().rss / (1024 * 1024)
+        
+        # ২. ব্যাকগ্রাউন্ডে রানিং সকল বটের এবং তাদের চাইল্ড প্রসেসগুলোর মেমোরি যোগ করা
+        for folder, proc in list(running_processes.items()):
+            if proc.poll() is None:
+                try:
+                    p = psutil.Process(proc.pid)
+                    total_ram += p.memory_info().rss / (1024 * 1024)
+                    # চাইল্ড প্রসেস থাকলে সেগুলোর মেমোরিও যোগ হবে
+                    for child in p.children(recursive=True):
+                        total_ram += child.memory_info().rss / (1024 * 1024)
+                except:
+                    pass
+        return jsonify({
+            "used_ram": round(total_ram, 1),
+            "total_ram": 512,
+            "percent": min(round((total_ram / 512) * 100, 1), 100.0)
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/logs/<folder_name>')
 @requires_auth
@@ -270,10 +326,11 @@ def deploy():
     start_file = request.form.get('start_file') or "main.py"
     custom_port = request.form.get('custom_port')
     env_text = request.form.get('env_vars')
+    max_ram = request.form.get('max_ram') or "80" # মেমোরি ইনপুট রিড
     folder_name = repo_link.split("/")[-1].replace(".git", "")
 
     deployment_status[folder_name] = "⏳ Queued..."
-    threading.Thread(target=install_and_run, args=(repo_link, start_file, folder_name, custom_port, env_text)).start()
+    threading.Thread(target=install_and_run, args=(repo_link, start_file, folder_name, custom_port, env_text, max_ram)).start()
     return redirect(url_for('home'))
 
 @app.route('/start/<folder_name>')
@@ -302,10 +359,18 @@ def update_bot(folder_name):
 @requires_auth
 def stop_bot(folder_name):
     if folder_name in running_processes:
+        proc = running_processes[folder_name]
         try:
-            running_processes[folder_name].terminate()
-            running_processes[folder_name].wait(timeout=2) 
-        except: running_processes[folder_name].kill()
+            # চাইল্ড প্রসেসগুলোসহ সম্পূর্ণ প্রসেস ট্রি কিল করার ব্যবস্থা
+            parent = psutil.Process(proc.pid)
+            for child in parent.children(recursive=True):
+                child.kill()
+            parent.kill()
+            proc.wait(timeout=2)
+        except Exception as e:
+            try:
+                proc.kill()
+            except: pass
         del running_processes[folder_name]
     deployment_status[folder_name] = "Stopped 🔴"
     return redirect(url_for('home'))
@@ -332,14 +397,20 @@ def get_config(folder_name):
     config = bot_configs.get(folder_name, {})
     env_vars = config.get("env", {})
     env_text = "\n".join([f"{k}={v}" for k, v in env_vars.items()])
-    return jsonify({"env": env_text})
+    max_ram = config.get("max_ram", "80")
+    return jsonify({"env": env_text, "max_ram": max_ram})
 
 @app.route('/update_config/<folder_name>', methods=['POST'])
 @requires_auth
 def update_config(folder_name):
     if folder_name in bot_configs:
         env_text = request.form.get("env_vars", "")
+        max_ram = request.form.get("max_ram")
+        
         bot_configs[folder_name]["env"] = parse_env_text(env_text)
+        if max_ram:
+            bot_configs[folder_name]["max_ram"] = str(max_ram)
+            
         save_data(folder_name)
         return "Updated", 200
     return "Not Found", 404
