@@ -12,12 +12,6 @@ import psutil
 from functools import wraps
 from flask import Flask, render_template, request, redirect, url_for, jsonify, Response
 
-# লিনাক্স সিস্টেমে সাব-প্রসেসের মেমোরি কন্ট্রোল করার জন্য মডিউল ইম্পোর্ট
-try:
-    import resource
-except ImportError:
-    resource = None
-
 app = Flask(__name__)
 
 # --- সিকিউরিটি (লগিন সিস্টেম) ---
@@ -113,15 +107,6 @@ def parse_env_text(text):
             env_vars[key.strip()] = value.strip()
     return env_vars
 
-def set_process_limits(max_ram_mb):
-    """ সাব-প্রসেসের মেমোরি লিমিটেশন সেট করার লিনাক্স মেকানিজম """
-    def limit_memory():
-        if resource is not None:
-            max_bytes = int(max_ram_mb) * 1024 * 1024
-            # RLIMIT_AS দিয়ে কন্টেইনারের ভার্চুয়াল মেমোরি বা এড্রেস স্পেস কন্ট্রোল করা হয়
-            resource.setrlimit(resource.RLIMIT_AS, (max_bytes, max_bytes))
-    return limit_memory
-
 def pull_latest_code(folder_name):
     repo_path = os.path.join(CLONE_DIR, folder_name)
     if os.path.exists(os.path.join(repo_path, ".git")):
@@ -142,7 +127,6 @@ def run_bot_process(folder_name):
     
     start_file = config.get("start_file", "main.py")
     assigned_port = config.get("port", str(random.randint(5001, 9999)))
-    max_ram_mb = config.get("max_ram", "80") # মেমোরি লিমিট লোড
     
     run_path = os.path.join(repo_path, start_file)
     if not os.path.exists(run_path):
@@ -161,17 +145,13 @@ def run_bot_process(folder_name):
     try:
         log_file = open(log_file_path, "a", encoding="utf-8")
         
-        # সাবপ্রসেস তৈরির কনফিগারেশন সেটআপ
+        # সাবপ্রসেস তৈরির কনফিগারেশন সেটআপ (কোনো হার্ড মেমোরি লিমিট থাকবে না)
         popen_kwargs = {
             "cwd": repo_path, 
             "env": bot_env, 
             "stdout": log_file, 
             "stderr": subprocess.STDOUT
         }
-        
-        # যদি লিনাক্স ওএস হয় এবং resource মডিউল অ্যাভেইলেবল থাকে, তবে মেমোরি লিমিট লাগু হবে
-        if os.name != 'nt' and resource is not None:
-            popen_kwargs["preexec_fn"] = set_process_limits(max_ram_mb)
 
         proc = subprocess.Popen(["python", start_file], **popen_kwargs)
         running_processes[folder_name] = proc
@@ -214,14 +194,44 @@ def install_and_run(repo_link, start_file, folder_name, custom_port, env_text_or
 
 # --- অটো-রিস্টার্ট এবং Koyeb রিস্টোর ---
 def auto_restart_monitor():
-    """ক্র্যাশ করলে অটোমেটিক রিস্টার্ট করবে"""
+    """ক্র্যাশ করলে অটোমেটিক রিস্টার্ট করবে এবং র‍্যাম লিমিট অতিক্রম করলে প্রসেস বন্ধ করবে"""
     while True:
-        time.sleep(20)
+        time.sleep(10)  # প্রতি ১০ সেকেন্ডে চেক করবে
         for folder, proc in list(running_processes.items()):
+            # ১. প্রসেস বন্ধ হয়ে গেলে রিস্টার্ট করার মেকানিজম
             if proc.poll() is not None:
                 status = deployment_status.get(folder, "")
-                if "Stopped" not in status and "Deleted" not in status:
+                # যদি ইউজার নিজে বন্ধ না করে থাকে, তবে ক্র্যাশ হওয়া বট স্বয়ংক্রিয়ভাবে রিস্টার্ট নেবে
+                if "Stopped" not in status and "Deleted" not in status and "Exceeded" not in status:
                     run_bot_process(folder)
+            else:
+                # ২. প্রসেস রানিং থাকলে র‍্যাম লিমিট চেক করার মেকানিজম (RSS - Physical RAM Monitor)
+                try:
+                    config = bot_configs.get(folder, {})
+                    max_ram_limit = int(config.get("max_ram", "80"))
+                    
+                    p = psutil.Process(proc.pid)
+                    # মেইন প্রসেসের মেমোরি (RSS)
+                    total_used_ram = p.memory_info().rss / (1024 * 1024)
+                    # চাইল্ড প্রসেসের মেমোরিও যোগ করা হচ্ছে
+                    for child in p.children(recursive=True):
+                        total_used_ram += child.memory_info().rss / (1024 * 1024)
+                    
+                    # লিমিট ক্রস করলে সাথে সাথে কিল করবে
+                    if total_used_ram > max_ram_limit:
+                        print(f"⚠️ Bot {folder} exceeded RAM limit ({round(total_used_ram, 1)}MB / {max_ram_limit}MB). Stopping it.")
+                        # চাইল্ড এবং প্যারেন্ট প্রসেস কিল করা হচ্ছে
+                        for child in p.children(recursive=True):
+                            child.kill()
+                        p.kill()
+                        proc.wait()
+                        
+                        # স্ট্যাটাস আপডেট করা (যাতে ড্যাশবোর্ড এটি স্টপড হিসেবে রেন্ডার করতে পারে)
+                        deployment_status[folder] = f"❌ Exceeded RAM Limit ({round(total_used_ram, 1)}MB) [Stopped 🔴]"
+                        if folder in running_processes:
+                            del running_processes[folder]
+                except Exception as e:
+                    pass
 
 def restore_sessions():
     """সার্ভার রিস্টার্ট নিলে ডাটাবেস থেকে সব বট রিস্টোর করবে"""
